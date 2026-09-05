@@ -1,9 +1,6 @@
 import { useMemo, useState } from 'react';
 import {
   Activity,
-  AlertTriangle,
-  ArrowDownRight,
-  ArrowUpRight,
   CheckCircle2,
   ChevronRight,
   Clock,
@@ -13,7 +10,8 @@ import {
   TrendingUp,
   X,
   Zap,
-  type LucideIcon,
+  SlidersHorizontal,
+  FileCode2,
 } from 'lucide-react';
 import {
   Format_date,
@@ -23,18 +21,17 @@ import {
   type Model as ApiModel,
   type Stats,
 } from './api.ts';
+import { Empty_state, Page_heading, Status_badge } from './ui.tsx';
 import './ModelUsageDashboard.css';
 
 /* ============================== 类型定义 ============================== */
 
 export type TimeRange = '1h' | '24h' | '7d' | '30d';
 
-export type CallStatus = 'success' | 'error';
-
 export interface CallLog {
   id: string;
   timestamp: string;
-  status: CallStatus;
+  status: string;
   endpoint: string;
   latencyMs: number;
   inputTokens: number;
@@ -59,11 +56,8 @@ export interface OverviewMetrics {
   totalCalls: number;
   totalCallsTrend: number;
   successRate: number;
-  successRateTrend: number;
   avgLatencyMs: number;
-  avgLatencyTrend: number;
   totalTokens: number;
-  totalTokensTrend: number;
 }
 
 export interface DashboardDataProps {
@@ -79,159 +73,96 @@ const TIME_RANGE_OPTIONS: { value: TimeRange; label: string }[] = [
   { value: '30d', label: '30 天' },
 ];
 
-/** 延迟分档：<500ms 绿 / 500-1500ms 黄 / >1500ms 红 */
-type LatencyLevel = 'good' | 'warn' | 'danger';
-
-function getLatencyLevel(ms: number): LatencyLevel {
-  if (ms <= 0) return 'good';
-  if (ms < 500) return 'good';
-  if (ms <= 1500) return 'warn';
-  return 'danger';
-}
-
-/* ============================== 呈现子组件 ============================== */
-
-interface MetricCardProps {
-  title: string;
-  value: string;
-  icon: LucideIcon;
-  iconClass: string;
-  trend: number;
-  invertTrend?: boolean;
-  suffix?: string;
-}
-
-function MetricCard({
-  title,
-  value,
-  icon: Icon,
-  iconClass,
-  trend,
-  invertTrend = false,
-  suffix,
-}: MetricCardProps) {
-  const isZero = trend === 0 || !Number.isFinite(trend);
-  const isPositive = trend > 0;
-  const isGood = invertTrend ? !isPositive : isPositive;
-
-  const trendClass = isZero ? 'neutral' : isGood ? 'positive' : 'negative';
-  const TrendIcon = isPositive ? ArrowUpRight : ArrowDownRight;
-
-  return (
-    <div className="mud-metric-card">
-      <div className="mud-metric-head">
-        <span className="mud-metric-title">{title}</span>
-        <div className={`mud-metric-icon ${iconClass}`}>
-          <Icon size={18} />
-        </div>
-      </div>
-      <div className="mud-metric-body">
-        <div className="mud-metric-value">
-          {value}
-          {suffix && <span className="mud-metric-suffix">{suffix}</span>}
-        </div>
-        <div className={`mud-trend-tag ${trendClass}`}>
-          {!isZero && <TrendIcon size={12} />}
-          <span>{isZero ? '平稳' : `${Math.abs(trend).toFixed(1)}%`}</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function LatencyTag({ ms }: { ms: number }) {
-  if (ms <= 0) return <span className="mud-latency good">-</span>;
-  const level = getLatencyLevel(ms);
-  return (
-    <span className={`mud-latency ${level}`}>
-      <span className="mud-latency-dot" />
-      {Format_number(ms)} ms
-    </span>
-  );
+/** @brief 获取延迟分类等级 */
+function getLatencyClass(ms: number): string {
+  if (ms <= 0) return 'succeeded';
+  if (ms < 500) return 'succeeded';
+  if (ms <= 1500) return 'running';
+  return 'failed';
 }
 
 /* ============================== 日志抽屉 ============================== */
 
-interface LogDrawerProps {
-  model: ModelStat;
-  onClose: () => void;
-}
-
-function LogDrawer({ model, onClose }: LogDrawerProps) {
-  const errorCount = model.logs.filter((l) => l.status === 'error').length;
+function LogDrawer({ model, onClose }: { model: ModelStat; onClose: () => void }) {
+  const errorCount = model.logs.filter((l) => l.status === 'failed').length;
 
   return (
     <>
-      <div className="mud-drawer-backdrop" onClick={onClose} />
-      <aside className="mud-drawer" role="dialog" aria-label={`${model.name} 调用日志`}>
-        <header className="mud-drawer-header">
-          <div>
-            <div className="mud-drawer-title">
-              <Server size={16} />
-              {model.name}
-            </div>
-            <div className="mud-drawer-sub">
-              {model.provider} · 周期内 {model.logs.length} 次调用 · {errorCount} 次失败
+      <div className="drawer-shade" onClick={onClose} />
+      <aside className="log-drawer" role="dialog" aria-label={`${model.name} 调用记录`}>
+        <header className="drawer-head">
+          <div className="drawer-title-group">
+            <span className="eyebrow">CALL HISTORY</span>
+            <h2>{model.name}</h2>
+            <div className="drawer-meta">
+              <span className="model-provider-badge">{model.provider}</span>
+              <span>周期内共 {model.logs.length} 次调用</span>
+              {errorCount > 0 && <span className="warning-tag">{errorCount} 次失败</span>}
             </div>
           </div>
-          <button className="mud-icon-btn" onClick={onClose} aria-label="关闭">
+          <button className="icon-button" onClick={onClose} aria-label="关闭">
             <X size={18} />
           </button>
         </header>
 
-        <div className="mud-drawer-summary">
-          <div className="mud-drawer-summary-item">
-            <Clock size={14} /> 平均延迟 <LatencyTag ms={model.avgLatencyMs} />
+        <div className="drawer-stats-row">
+          <div className="drawer-stat-item">
+            <span className="drawer-stat-label"><Clock size={13} /> 平均响应延迟</span>
+            <strong>{model.avgLatencyMs > 0 ? `${Format_number(model.avgLatencyMs)} ms` : '—'}</strong>
           </div>
-          <div className="mud-drawer-summary-item">
-            <CheckCircle2 size={14} /> 成功率 <strong>{model.totalCalls > 0 ? `${model.successRate.toFixed(1)}%` : '暂无'}</strong>
+          <div className="drawer-stat-item">
+            <span className="drawer-stat-label"><CheckCircle2 size={13} /> 整体成功率</span>
+            <strong>{model.totalCalls > 0 ? `${model.successRate.toFixed(1)}%` : '暂无'}</strong>
+          </div>
+          <div className="drawer-stat-item">
+            <span className="drawer-stat-label"><Coins size={13} /> Token 总消耗</span>
+            <strong>{Format_tokens(model.totalTokens, 0)}</strong>
           </div>
         </div>
 
-        <div className="mud-drawer-body">
+        <div className="drawer-body">
           {model.logs.length === 0 ? (
-            <div className="mud-empty" style={{ padding: '40px 0' }}>
-              <Clock size={24} />
-              <p>该模型在当前周期内暂无调用记录</p>
-            </div>
+            <Empty_state title="暂无调用记录" detail="所选周期内未产生针对该模型的请求。" />
           ) : (
-            <table className="mud-log-table">
-              <thead>
-                <tr>
-                  <th>时间</th>
-                  <th>状态</th>
-                  <th>来源</th>
-                  <th>延迟</th>
-                  <th>Tokens</th>
-                </tr>
-              </thead>
-              <tbody>
-                {model.logs.map((log) => (
-                  <tr key={log.id} className={log.status === 'error' ? 'is-error' : ''}>
-                    <td className="mud-log-time">{log.timestamp}</td>
-                    <td>
-                      {log.status === 'success' ? (
-                        <span className="mud-status success" title="成功">
-                          <CheckCircle2 size={13} /> 成功
-                        </span>
-                      ) : (
-                        <span className="mud-status error" title={log.errorMessage}>
-                          <AlertTriangle size={13} /> 失败
-                        </span>
-                      )}
-                      {log.errorMessage && <div className="mud-log-error-msg">{log.errorMessage}</div>}
-                    </td>
-                    <td className="mud-log-endpoint">{log.endpoint}</td>
-                    <td>
-                      <LatencyTag ms={log.latencyMs} />
-                    </td>
-                    <td className="mud-log-tokens">
-                      {log.inputTokens || log.outputTokens ? `${Format_number(log.inputTokens)} / ${Format_number(log.outputTokens)}` : '未上报'}
-                    </td>
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>状态</th>
+                    <th>调用来源</th>
+                    <th>耗时</th>
+                    <th>Token (入 / 出)</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {model.logs.map((log) => (
+                    <tr key={log.id} className={log.status === 'failed' ? 'error-row' : ''}>
+                      <td className="nowrap"><small>{log.timestamp}</small></td>
+                      <td>
+                        <Status_badge status={log.status} />
+                        {log.errorMessage && <small className="error-detail-text">{log.errorMessage}</small>}
+                      </td>
+                      <td>
+                        <span className="source-tag">{log.endpoint}</span>
+                      </td>
+                      <td className="nowrap">
+                        <span className={`status ${getLatencyClass(log.latencyMs)}`}>
+                          <i />{Format_number(log.latencyMs)} ms
+                        </span>
+                      </td>
+                      <td className="nowrap">
+                        <small>
+                          {log.inputTokens || log.outputTokens
+                            ? `${Format_number(log.inputTokens)} / ${Format_number(log.outputTokens)}`
+                            : '未上报'}
+                        </small>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       </aside>
@@ -255,11 +186,8 @@ export function ModelUsageDashboard({ data }: { data?: DashboardDataProps }) {
           totalCalls: 0,
           totalCallsTrend: 0,
           successRate: 100,
-          successRateTrend: 0,
           avgLatencyMs: 0,
-          avgLatencyTrend: 0,
           totalTokens: 0,
-          totalTokensTrend: 0,
         },
         modelStats: [] as ModelStat[],
       };
@@ -308,11 +236,8 @@ export function ModelUsageDashboard({ data }: { data?: DashboardDataProps }) {
       totalCalls,
       totalCallsTrend,
       successRate,
-      successRateTrend: 0,
       avgLatencyMs,
-      avgLatencyTrend: 0,
       totalTokens,
-      totalTokensTrend: 0,
     };
 
     // 按模型名称分组仅收集当前时间范围内有调用的模型
@@ -340,8 +265,8 @@ export function ModelUsageDashboard({ data }: { data?: DashboardDataProps }) {
       const logs: CallLog[] = modelCalls.map((c) => ({
         id: c.id,
         timestamp: Format_date(c.created_at),
-        status: c.status === 'succeeded' ? 'success' : 'error',
-        endpoint: c.source === 'mcp' ? 'MCP / Agent' : c.source === 'task' ? 'Web 任务' : 'Chat API',
+        status: c.status,
+        endpoint: c.source === 'mcp' ? 'MCP 协议' : c.source === 'task' ? '工作台任务' : 'Chat API',
         latencyMs: c.duration_ms,
         inputTokens: c.input_tokens ?? 0,
         outputTokens: c.output_tokens ?? 0,
@@ -396,184 +321,221 @@ export function ModelUsageDashboard({ data }: { data?: DashboardDataProps }) {
   const currentRangeLabel = TIME_RANGE_OPTIONS.find((o) => o.value === timeRange)?.label || '24 小时';
 
   return (
-    <div className="mud-root">
-      {/* ---------- 页头：标题 + 时间范围 ---------- */}
-      <header className="mud-header">
-        <div>
-          <h1 className="mud-title">模型用量监控</h1>
-          <p className="mud-subtitle">实时追踪所选周期内实际调用过的模型指标、成功率与响应延迟</p>
+    <div className="analytics-page">
+      {/* 统一页面头部 */}
+      <Page_heading
+        eyebrow="MONITORING & METRICS"
+        title="监控看板"
+        description="实时追踪各模型在工作台、API 与 MCP 调用中的运行节奏、成功率与响应延迟。"
+        action={
+          <div className="segmented" role="tablist" aria-label="统计时间范围">
+            {TIME_RANGE_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                role="tab"
+                aria-selected={timeRange === opt.value}
+                className={timeRange === opt.value ? 'selected' : ''}
+                onClick={() => {
+                  setTimeRange(opt.value);
+                  setSelectedModelId(null);
+                }}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        }
+      />
+
+      {/* 统一指标卡片网格 */}
+      <div className="metrics">
+        <div className="metric">
+          <div className="metric-label">
+            <span>周期调用次数</span>
+            <Activity size={18} />
+          </div>
+          <div className="metric-value">{Format_number(metrics.totalCalls)}</div>
+          <p>
+            {metrics.totalCallsTrend !== 0
+              ? `环比 ${metrics.totalCallsTrend > 0 ? '+' : ''}${metrics.totalCallsTrend.toFixed(1)}%`
+              : '与前一周期持平'}
+          </p>
         </div>
-        <div className="mud-range-switch" role="tablist" aria-label="时间范围">
-          {TIME_RANGE_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              role="tab"
-              aria-selected={timeRange === opt.value}
-              className={`mud-range-btn ${timeRange === opt.value ? 'active' : ''}`}
-              onClick={() => {
-                setTimeRange(opt.value);
-                setSelectedModelId(null);
-              }}
+
+        <div className="metric">
+          <div className="metric-label">
+            <span>成功率</span>
+            <CheckCircle2 size={18} />
+          </div>
+          <div className="metric-value">
+            {metrics.totalCalls > 0 ? `${metrics.successRate.toFixed(1)}` : '—'}
+            {metrics.totalCalls > 0 && <span>%</span>}
+          </div>
+          <p>
+            {metrics.totalCalls > 0
+              ? `${Math.round((metrics.totalCalls * metrics.successRate) / 100)} 次执行成功`
+              : '暂无调用'}
+          </p>
+        </div>
+
+        <div className="metric">
+          <div className="metric-label">
+            <span>平均响应延迟</span>
+            <Zap size={18} />
+          </div>
+          <div className="metric-value">
+            {metrics.avgLatencyMs > 0 ? `${Format_number(metrics.avgLatencyMs)}` : '—'}
+            {metrics.avgLatencyMs > 0 && <span>ms</span>}
+          </div>
+          <p>
+            {metrics.avgLatencyMs <= 0
+              ? '无调用耗时'
+              : metrics.avgLatencyMs < 500
+                ? '响应敏捷极速'
+                : metrics.avgLatencyMs <= 1500
+                  ? '响应平稳正常'
+                  : '响应延迟较高'}
+          </p>
+        </div>
+
+        <div className="metric">
+          <div className="metric-label">
+            <span>Token 消耗量</span>
+            <Coins size={18} />
+          </div>
+          <div className="metric-value">{Format_tokens(metrics.totalTokens, 0)}</div>
+          <p>来自供应商实际回报</p>
+        </div>
+      </div>
+
+      {/* 统一筛选工具栏 */}
+      <div className="catalog-toolbar">
+        <div className="filters">
+          <label className="search">
+            <Search size={16} />
+            <input
+              aria-label="搜索模型"
+              placeholder="搜索模型、供应商或专长…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </label>
+          <label className="select-wrap">
+            <SlidersHorizontal size={15} />
+            <select
+              aria-label="筛选供应商"
+              value={selectedProvider}
+              onChange={(e) => setSelectedProvider(e.target.value)}
             >
-              {opt.label}
-            </button>
-          ))}
+              <option value="all">所有活跃供应商</option>
+              {providerOptions.filter((p) => p !== 'all').map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
-      </header>
-
-      {/* ---------- 概览指标卡片 ---------- */}
-      <section className="mud-metrics-grid">
-        <MetricCard
-          title="周期调用次数"
-          value={Format_number(metrics.totalCalls)}
-          icon={Activity}
-          iconClass="blue"
-          trend={metrics.totalCallsTrend}
-        />
-        <MetricCard
-          title="成功率"
-          value={metrics.totalCalls > 0 ? metrics.successRate.toFixed(1) : '—'}
-          suffix={metrics.totalCalls > 0 ? '%' : ''}
-          icon={CheckCircle2}
-          iconClass="green"
-          trend={metrics.successRateTrend}
-        />
-        <MetricCard
-          title="平均响应延迟"
-          value={metrics.avgLatencyMs > 0 ? Format_number(metrics.avgLatencyMs) : '—'}
-          suffix={metrics.avgLatencyMs > 0 ? 'ms' : ''}
-          icon={Zap}
-          iconClass="amber"
-          trend={metrics.avgLatencyTrend}
-          invertTrend
-        />
-        <MetricCard
-          title="消耗 Token 数"
-          value={Format_tokens(metrics.totalTokens, 0)}
-          icon={Coins}
-          iconClass="violet"
-          trend={metrics.totalTokensTrend}
-        />
-      </section>
-
-      {/* ---------- 过滤工具栏 ---------- */}
-      <section className="mud-toolbar">
-        <div className="mud-search-box">
-          <Search size={15} />
-          <input
-            type="text"
-            placeholder="搜索调用过的模型、供应商或标签…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-          {search && (
-            <button className="mud-icon-btn sm" onClick={() => setSearch('')} aria-label="清除搜索">
-              <X size={14} />
-            </button>
-          )}
+        <div className="toolbar-info">
+          <TrendingUp size={14} />
+          <span>共 {filteredModels.length} 个活跃模型 · 统计周期：{currentRangeLabel}</span>
         </div>
-        <div className="mud-provider-filters">
-          {providerOptions.map((p) => (
-            <button
-              key={p}
-              className={`mud-chip ${selectedProvider === p ? 'active' : ''}`}
-              onClick={() => setSelectedProvider(p)}
-            >
-              {p === 'all' ? '全部供应商' : p}
-            </button>
-          ))}
-        </div>
-      </section>
+      </div>
 
-      {/* ---------- 模型明细列表 ---------- */}
-      <section className="mud-model-list">
-        <div className="mud-list-header">
-          <span>调用模型</span>
-          <span>调用量</span>
-          <span>成功率</span>
-          <span>平均延迟</span>
-          <span>Token 消耗</span>
-          <span aria-hidden />
-        </div>
-
+      {/* 模型调用排行面板 */}
+      <div className="panel analytics-table-panel">
         {modelStats.length === 0 ? (
-          <div className="mud-empty" style={{ padding: '60px 20px' }}>
-            <Clock size={32} />
-            <p style={{ marginTop: '12px', fontSize: '13px', fontWeight: 500, color: '#687c56' }}>
-              最近 {currentRangeLabel} 内暂无模型调用记录
-            </p>
-            <small style={{ color: '#97a38a', marginTop: '6px', fontSize: '11px' }}>
-              通过工作台、HTTP API 或 MCP 发起调用后，将在此处自动呈现模型性能与明细日志
-            </small>
-          </div>
+          <Empty_state
+            title={`最近 ${currentRangeLabel} 内暂无模型调用`}
+            detail="发起任务、API 请求或通过 MCP 调用后，将在此处自动呈现模型性能与明细。"
+          />
         ) : filteredModels.length === 0 ? (
-          <div className="mud-empty">
-            <Search size={28} />
-            <p>未找到匹配的模型，请调整搜索或供应商筛选条件</p>
-          </div>
+          <Empty_state title="未找到匹配的模型" detail="试试其他搜索词或选择所有供应商。" />
         ) : (
-          filteredModels.map((m) => (
-            <button
-              key={m.id}
-              className="mud-model-row"
-              onClick={() => setSelectedModelId(m.id)}
-              aria-expanded={selectedModelId === m.id}
-            >
-              <div className="mud-cell mud-cell-model">
-                <div className="mud-model-avatar">{m.provider.charAt(0)}</div>
-                <div>
-                  <div className="mud-model-name">{m.name}</div>
-                  <div className="mud-model-provider">
-                    {m.provider}
-                    {m.tags.length > 0 && (
-                      <span style={{ marginLeft: '8px', opacity: 0.8 }}>
-                        · {m.tags.join(', ')}
+          <div className="table-scroll">
+            <table className="analytics-table">
+              <thead>
+                <tr>
+                  <th>模型</th>
+                  <th>供应商</th>
+                  <th>调用量</th>
+                  <th>成功率</th>
+                  <th>平均延迟</th>
+                  <th>Token 消耗</th>
+                  <th style={{ textAlign: 'right' }}>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredModels.map((m, index) => (
+                  <tr
+                    key={m.id}
+                    className="clickable-row"
+                    onClick={() => setSelectedModelId(m.id)}
+                  >
+                    <td>
+                      <div className="model-row-identity">
+                        <div className={`model-avatar-sm tone-${index % 4}`}>
+                          {m.name.slice(0, 1).toUpperCase()}
+                        </div>
+                        <div className="model-row-name-text">
+                          <strong>{m.name}</strong>
+                          {m.tags.length > 0 && <small>{m.tags.join(' · ')}</small>}
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <span className="model-provider-badge">{m.provider}</span>
+                    </td>
+                    <td>
+                      <div className="call-count-cell">
+                        <strong>{Format_number(m.totalCalls)}</strong>
+                        <small>次调用</small>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="rate-cell">
+                        <div className="rate-bar-track">
+                          <div
+                            className={`rate-bar-fill ${m.successRate >= 98 ? 'good' : m.successRate >= 90 ? 'warn' : 'danger'}`}
+                            style={{ width: `${m.successRate}%` }}
+                          />
+                        </div>
+                        <span className="rate-value">{m.successRate.toFixed(1)}%</span>
+                      </div>
+                    </td>
+                    <td>
+                      <span className={`status ${getLatencyClass(m.avgLatencyMs)}`}>
+                        <i />
+                        {m.avgLatencyMs > 0 ? `${Format_number(m.avgLatencyMs)} ms` : '—'}
                       </span>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <div className="mud-cell">
-                <div className="mud-cell-main">{Format_number(m.totalCalls)}</div>
-                <div className="mud-cell-sub">次调用</div>
-              </div>
-
-              <div className="mud-cell mud-cell-rate">
-                <div className="mud-rate-track">
-                  <div
-                    className={`mud-rate-fill ${m.successRate >= 99 ? 'good' : m.successRate >= 90 ? 'warn' : 'danger'}`}
-                    style={{ width: `${m.successRate}%` }}
-                  />
-                </div>
-                <span className="mud-cell-sub">{m.successRate.toFixed(1)}%</span>
-              </div>
-
-              <div className="mud-cell">
-                <LatencyTag ms={m.avgLatencyMs} />
-              </div>
-
-              <div className="mud-cell">
-                <div className="mud-cell-main">
-                  <Coins size={14} className="mud-token-icon" />
-                  {Format_tokens(m.totalTokens, 0)}
-                </div>
-              </div>
-
-              <div className="mud-cell mud-cell-arrow">
-                <ChevronRight size={16} />
-              </div>
-            </button>
-          ))
+                    </td>
+                    <td>
+                      <span className="token-cell">
+                        <Coins size={13} />
+                        {Format_tokens(m.totalTokens, 0)}
+                      </span>
+                    </td>
+                    <td style={{ textAlign: 'right' }}>
+                      <button
+                        className="text-link"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedModelId(m.id);
+                        }}
+                      >
+                        调用明细
+                        <ChevronRight size={14} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
-      </section>
+      </div>
 
-      <footer className="mud-footer">
-        <TrendingUp size={13} />
-        共 {filteredModels.length} 个活跃模型 · 统计周期：{currentRangeLabel}
-      </footer>
-
-      {/* ---------- 调用日志抽屉 ---------- */}
+      {/* 调用日志抽屉 */}
       {selectedModel && <LogDrawer model={selectedModel} onClose={() => setSelectedModelId(null)} />}
     </div>
   );
