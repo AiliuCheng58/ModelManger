@@ -8,7 +8,13 @@ export function Status_badge({ status }: { status: string }) {
   return <span className={`status ${status}`}><i />{Status_names[status] ?? status}</span>;
 }
 /** @brief 用统一图形表现应用入口。 */
-export function Brand_mark() { return <span className="brand-mark"><Layers3 size={23} strokeWidth={1.5} /></span>; }
+export function Brand_mark() {
+  return (
+    <span className="brand-mark">
+      <img src="/logo.svg" alt="Model Atelier Logo" />
+    </span>
+  );
+}
 /** @brief 显示空数据说明及下一步入口。 */
 export function Empty_state({ title, detail, action }: { title: string; detail: string; action?: ReactNode }) {
   return <div className="empty"><span className="empty-icon"><Layers3 size={26} strokeWidth={1.2} /></span><h3>{title}</h3><p>{detail}</p>{action}</div>;
