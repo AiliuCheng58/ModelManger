@@ -5,9 +5,11 @@ import { Brand_mark, Busy_icon, Empty_state, Status_badge, Text_link } from './u
 import { Model_catalog, Provider_page } from './Catalog.tsx';
 import { Task_page, Task_editor } from './Tasks.tsx';
 import { Access_page } from './Access.tsx';
+import { ModelUsageDashboard } from './ModelUsageDashboard.tsx';
 
 const Navigation = [
   { id: 'overview', label: '工作台', icon: LayoutDashboard },
+  { id: 'analytics', label: '监控看板', icon: Activity },
   { id: 'models', label: '模型目录', icon: Layers3 },
   { id: 'providers', label: '供应商', icon: PlugZap },
   { id: 'tasks', label: '任务记录', icon: ListTodo },
@@ -65,6 +67,7 @@ export function App() {
       <main id="main-content">{error && <div className="error-banner" role="alert"><AlertCircle size={18} /><span>{error}</span><button onClick={() => { void refresh().catch(failure => setError(failure.message)); }}>重新连接</button></div>}
         {!data ? <div className="loading-state"><Busy_icon />正在整理工作台…</div> : <>
           {page === 'overview' && <Overview data={data} navigate={Page_open} createTask={() => setNewTask({})} openTask={Task_open} />}
+          {page === 'analytics' && <ModelUsageDashboard />}
           {page === 'models' && <Model_catalog models={data.models} providers={data.providers} notify={notify} refresh={refresh} createTask={model => setNewTask({ model })} openProviders={() => Page_open('providers')} />}
           {page === 'providers' && <Provider_page providers={data.providers} notify={notify} refresh={refresh} />}
           {page === 'tasks' && <Task_page tasks={data.tasks} selected={selected} select={setSelected} createTask={() => setNewTask({})} notify={notify} refresh={refresh} />}
