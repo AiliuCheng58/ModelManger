@@ -171,7 +171,7 @@ function LogDrawer({ model, onClose }: LogDrawerProps) {
               {model.name}
             </div>
             <div className="mud-drawer-sub">
-              {model.provider} · 最近 {model.logs.length} 条调用 · {errorCount} 条失败
+              {model.provider} · 周期内 {model.logs.length} 次调用 · {errorCount} 次失败
             </div>
           </div>
           <button className="mud-icon-btn" onClick={onClose} aria-label="关闭">
@@ -192,7 +192,7 @@ function LogDrawer({ model, onClose }: LogDrawerProps) {
           {model.logs.length === 0 ? (
             <div className="mud-empty" style={{ padding: '40px 0' }}>
               <Clock size={24} />
-              <p>该模型暂无调用记录</p>
+              <p>该模型在当前周期内暂无调用记录</p>
             </div>
           ) : (
             <table className="mud-log-table">
@@ -247,14 +247,7 @@ export function ModelUsageDashboard({ data }: { data?: DashboardDataProps }) {
   const [selectedProvider, setSelectedProvider] = useState<string>('all');
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
 
-  // 1. 动态供应商列表（从实际添加的供应商中获取）
-  const providerOptions = useMemo(() => {
-    if (!data?.providers) return ['all'];
-    const names = data.providers.map((p) => p.name).filter(Boolean);
-    return ['all', ...Array.from(new Set(names))];
-  }, [data?.providers]);
-
-  // 2. 根据时间范围与实际数据库数据计算各项指标
+  // 1. 根据时间范围与实际数据库数据计算各项指标（仅保留周期内有调用的活跃模型）
   const { metrics, modelStats } = useMemo(() => {
     if (!data) {
       return {
@@ -294,7 +287,7 @@ export function ModelUsageDashboard({ data }: { data?: DashboardDataProps }) {
     const avgLatencyMs =
       totalCalls > 0
         ? Math.round(recentCalls.reduce((s, c) => s + c.duration_ms, 0) / totalCalls)
-        : Math.round(data.stats.totals.average_ms || 0);
+        : 0;
     const totalTokens = recentCalls.reduce(
       (s, c) => s + (c.input_tokens ?? 0) + (c.output_tokens ?? 0),
       0,
@@ -312,43 +305,39 @@ export function ModelUsageDashboard({ data }: { data?: DashboardDataProps }) {
         : 0;
 
     const metricsResult: OverviewMetrics = {
-      totalCalls: totalCalls > 0 ? totalCalls : data.stats.totals.calls,
+      totalCalls,
       totalCallsTrend,
-      successRate: totalCalls > 0 ? successRate : (data.stats.totals.calls > 0 ? (data.stats.totals.succeeded / data.stats.totals.calls) * 100 : 100),
+      successRate,
       successRateTrend: 0,
       avgLatencyMs,
       avgLatencyTrend: 0,
-      totalTokens: totalTokens > 0 ? totalTokens : (data.stats.totals.input_tokens + data.stats.totals.output_tokens),
+      totalTokens,
       totalTokensTrend: 0,
     };
 
-    // 匹配数据库中的模型统计
-    const statsMap = new Map<string, { calls: number; tokens: number; avgLatency: number }>();
-    for (const m of data.stats.models || []) {
-      statsMap.set(m.model_name, { calls: m.calls, tokens: m.tokens, avgLatency: m.average_ms });
+    // 按模型名称分组仅收集当前时间范围内有调用的模型
+    const modelCallsMap = new Map<string, typeof recentCalls>();
+    for (const c of recentCalls) {
+      const group = modelCallsMap.get(c.model_name) || [];
+      group.push(c);
+      modelCallsMap.set(c.model_name, group);
     }
 
-    const list: ModelStat[] = (data.models || []).map((m) => {
-      const modelCalls = recentCalls.filter((c) => c.model_name === m.remote_id);
-      const allModelCalls = (data.stats.recent || []).filter((c) => c.model_name === m.remote_id);
-      const statEntry = statsMap.get(m.remote_id);
-
-      const callsCount = modelCalls.length > 0 ? modelCalls.length : (statEntry?.calls ?? 0);
+    const list: ModelStat[] = [];
+    for (const [modelName, modelCalls] of modelCallsMap.entries()) {
+      const modelMeta = (data.models || []).find((m) => m.remote_id === modelName);
+      const providerName = modelMeta?.provider_name || modelCalls[0]?.provider_name || '未知供应商';
       const modelSucceeded = modelCalls.filter((c) => c.status === 'succeeded').length;
-      const modelSuccessRate =
-        modelCalls.length > 0
-          ? (modelSucceeded / modelCalls.length) * 100
-          : 100;
-      const modelAvgLatency =
-        modelCalls.length > 0
-          ? Math.round(modelCalls.reduce((s, c) => s + c.duration_ms, 0) / modelCalls.length)
-          : Math.round(statEntry?.avgLatency ?? 0);
-      const modelTokens =
-        modelCalls.length > 0
-          ? modelCalls.reduce((s, c) => s + (c.input_tokens ?? 0) + (c.output_tokens ?? 0), 0)
-          : (statEntry?.tokens ?? 0);
+      const modelSuccessRate = (modelSucceeded / modelCalls.length) * 100;
+      const modelAvgLatency = Math.round(
+        modelCalls.reduce((s, c) => s + c.duration_ms, 0) / modelCalls.length,
+      );
+      const modelTokens = modelCalls.reduce(
+        (s, c) => s + (c.input_tokens ?? 0) + (c.output_tokens ?? 0),
+        0,
+      );
 
-      const logs: CallLog[] = allModelCalls.map((c) => ({
+      const logs: CallLog[] = modelCalls.map((c) => ({
         id: c.id,
         timestamp: Format_date(c.created_at),
         status: c.status === 'succeeded' ? 'success' : 'error',
@@ -359,25 +348,31 @@ export function ModelUsageDashboard({ data }: { data?: DashboardDataProps }) {
         errorMessage: c.error ?? undefined,
       }));
 
-      return {
-        id: m.id,
-        name: m.remote_id,
-        provider: m.provider_name,
-        tags: m.tags || [],
-        enabled: Boolean(m.enabled),
-        totalCalls: callsCount,
+      list.push({
+        id: modelMeta?.id || modelName,
+        name: modelName,
+        provider: providerName,
+        tags: modelMeta?.tags || [],
+        enabled: Boolean(modelMeta?.enabled ?? true),
+        totalCalls: modelCalls.length,
         successRate: modelSuccessRate,
         avgLatencyMs: modelAvgLatency,
         totalTokens: modelTokens,
         logs,
-      };
-    });
+      });
+    }
 
-    // 默认按照调用量从高到低排序，调用量相同时按启用状态及名称排序
-    list.sort((a, b) => b.totalCalls - a.totalCalls || (b.enabled ? 1 : 0) - (a.enabled ? 1 : 0) || a.name.localeCompare(b.name));
+    // 默认按照调用量从高到低排序
+    list.sort((a, b) => b.totalCalls - a.totalCalls || a.name.localeCompare(b.name));
 
     return { metrics: metricsResult, modelStats: list };
   }, [data, timeRange]);
+
+  // 2. 动态供应商筛选列表（基于周期内调用的模型）
+  const providerOptions = useMemo(() => {
+    const names = modelStats.map((m) => m.provider).filter(Boolean);
+    return ['all', ...Array.from(new Set(names))];
+  }, [modelStats]);
 
   // 3. 过滤搜索
   const filteredModels = useMemo(() => {
@@ -398,13 +393,15 @@ export function ModelUsageDashboard({ data }: { data?: DashboardDataProps }) {
     [modelStats, selectedModelId],
   );
 
+  const currentRangeLabel = TIME_RANGE_OPTIONS.find((o) => o.value === timeRange)?.label || '24 小时';
+
   return (
     <div className="mud-root">
       {/* ---------- 页头：标题 + 时间范围 ---------- */}
       <header className="mud-header">
         <div>
           <h1 className="mud-title">模型用量监控</h1>
-          <p className="mud-subtitle">实时追踪个人工作台各实际模型的调用量、成功率和响应延迟</p>
+          <p className="mud-subtitle">实时追踪所选周期内实际调用过的模型指标、成功率与响应延迟</p>
         </div>
         <div className="mud-range-switch" role="tablist" aria-label="时间范围">
           {TIME_RANGE_OPTIONS.map((opt) => (
@@ -413,7 +410,10 @@ export function ModelUsageDashboard({ data }: { data?: DashboardDataProps }) {
               role="tab"
               aria-selected={timeRange === opt.value}
               className={`mud-range-btn ${timeRange === opt.value ? 'active' : ''}`}
-              onClick={() => setTimeRange(opt.value)}
+              onClick={() => {
+                setTimeRange(opt.value);
+                setSelectedModelId(null);
+              }}
             >
               {opt.label}
             </button>
@@ -424,7 +424,7 @@ export function ModelUsageDashboard({ data }: { data?: DashboardDataProps }) {
       {/* ---------- 概览指标卡片 ---------- */}
       <section className="mud-metrics-grid">
         <MetricCard
-          title="总调用次数"
+          title="周期调用次数"
           value={Format_number(metrics.totalCalls)}
           icon={Activity}
           iconClass="blue"
@@ -432,8 +432,8 @@ export function ModelUsageDashboard({ data }: { data?: DashboardDataProps }) {
         />
         <MetricCard
           title="成功率"
-          value={metrics.successRate.toFixed(1)}
-          suffix="%"
+          value={metrics.totalCalls > 0 ? metrics.successRate.toFixed(1) : '—'}
+          suffix={metrics.totalCalls > 0 ? '%' : ''}
           icon={CheckCircle2}
           iconClass="green"
           trend={metrics.successRateTrend}
@@ -448,7 +448,7 @@ export function ModelUsageDashboard({ data }: { data?: DashboardDataProps }) {
           invertTrend
         />
         <MetricCard
-          title="消耗总 Token 数"
+          title="消耗 Token 数"
           value={Format_tokens(metrics.totalTokens, 0)}
           icon={Coins}
           iconClass="violet"
@@ -462,7 +462,7 @@ export function ModelUsageDashboard({ data }: { data?: DashboardDataProps }) {
           <Search size={15} />
           <input
             type="text"
-            placeholder="搜索实际模型名称、供应商或标签…"
+            placeholder="搜索调用过的模型、供应商或标签…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -488,7 +488,7 @@ export function ModelUsageDashboard({ data }: { data?: DashboardDataProps }) {
       {/* ---------- 模型明细列表 ---------- */}
       <section className="mud-model-list">
         <div className="mud-list-header">
-          <span>模型</span>
+          <span>调用模型</span>
           <span>调用量</span>
           <span>成功率</span>
           <span>平均延迟</span>
@@ -496,71 +496,81 @@ export function ModelUsageDashboard({ data }: { data?: DashboardDataProps }) {
           <span aria-hidden />
         </div>
 
-        {filteredModels.length === 0 && (
+        {modelStats.length === 0 ? (
+          <div className="mud-empty" style={{ padding: '60px 20px' }}>
+            <Clock size={32} />
+            <p style={{ marginTop: '12px', fontSize: '13px', fontWeight: 500, color: '#687c56' }}>
+              最近 {currentRangeLabel} 内暂无模型调用记录
+            </p>
+            <small style={{ color: '#97a38a', marginTop: '6px', fontSize: '11px' }}>
+              通过工作台、HTTP API 或 MCP 发起调用后，将在此处自动呈现模型性能与明细日志
+            </small>
+          </div>
+        ) : filteredModels.length === 0 ? (
           <div className="mud-empty">
             <Search size={28} />
-            <p>未找到匹配的模型，请调整搜索条件</p>
+            <p>未找到匹配的模型，请调整搜索或供应商筛选条件</p>
           </div>
-        )}
-
-        {filteredModels.map((m) => (
-          <button
-            key={m.id}
-            className="mud-model-row"
-            onClick={() => setSelectedModelId(m.id)}
-            aria-expanded={selectedModelId === m.id}
-          >
-            <div className="mud-cell mud-cell-model">
-              <div className="mud-model-avatar">{m.provider.charAt(0)}</div>
-              <div>
-                <div className="mud-model-name">{m.name}</div>
-                <div className="mud-model-provider">
-                  {m.provider}
-                  {m.tags.length > 0 && (
-                    <span style={{ marginLeft: '8px', opacity: 0.8 }}>
-                      · {m.tags.join(', ')}
-                    </span>
-                  )}
+        ) : (
+          filteredModels.map((m) => (
+            <button
+              key={m.id}
+              className="mud-model-row"
+              onClick={() => setSelectedModelId(m.id)}
+              aria-expanded={selectedModelId === m.id}
+            >
+              <div className="mud-cell mud-cell-model">
+                <div className="mud-model-avatar">{m.provider.charAt(0)}</div>
+                <div>
+                  <div className="mud-model-name">{m.name}</div>
+                  <div className="mud-model-provider">
+                    {m.provider}
+                    {m.tags.length > 0 && (
+                      <span style={{ marginLeft: '8px', opacity: 0.8 }}>
+                        · {m.tags.join(', ')}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <div className="mud-cell">
-              <div className="mud-cell-main">{Format_number(m.totalCalls)}</div>
-              <div className="mud-cell-sub">次调用</div>
-            </div>
-
-            <div className="mud-cell mud-cell-rate">
-              <div className="mud-rate-track">
-                <div
-                  className={`mud-rate-fill ${m.totalCalls === 0 ? 'good' : m.successRate >= 99 ? 'good' : m.successRate >= 90 ? 'warn' : 'danger'}`}
-                  style={{ width: `${m.totalCalls === 0 ? 100 : m.successRate}%` }}
-                />
+              <div className="mud-cell">
+                <div className="mud-cell-main">{Format_number(m.totalCalls)}</div>
+                <div className="mud-cell-sub">次调用</div>
               </div>
-              <span className="mud-cell-sub">{m.totalCalls === 0 ? '暂无' : `${m.successRate.toFixed(1)}%`}</span>
-            </div>
 
-            <div className="mud-cell">
-              <LatencyTag ms={m.avgLatencyMs} />
-            </div>
-
-            <div className="mud-cell">
-              <div className="mud-cell-main">
-                <Coins size={14} className="mud-token-icon" />
-                {Format_tokens(m.totalTokens, 0)}
+              <div className="mud-cell mud-cell-rate">
+                <div className="mud-rate-track">
+                  <div
+                    className={`mud-rate-fill ${m.successRate >= 99 ? 'good' : m.successRate >= 90 ? 'warn' : 'danger'}`}
+                    style={{ width: `${m.successRate}%` }}
+                  />
+                </div>
+                <span className="mud-cell-sub">{m.successRate.toFixed(1)}%</span>
               </div>
-            </div>
 
-            <div className="mud-cell mud-cell-arrow">
-              <ChevronRight size={16} />
-            </div>
-          </button>
-        ))}
+              <div className="mud-cell">
+                <LatencyTag ms={m.avgLatencyMs} />
+              </div>
+
+              <div className="mud-cell">
+                <div className="mud-cell-main">
+                  <Coins size={14} className="mud-token-icon" />
+                  {Format_tokens(m.totalTokens, 0)}
+                </div>
+              </div>
+
+              <div className="mud-cell mud-cell-arrow">
+                <ChevronRight size={16} />
+              </div>
+            </button>
+          ))
+        )}
       </section>
 
       <footer className="mud-footer">
         <TrendingUp size={13} />
-        共 {filteredModels.length} 个实际模型 · 统计周期：{TIME_RANGE_OPTIONS.find((o) => o.value === timeRange)?.label}
+        共 {filteredModels.length} 个活跃模型 · 统计周期：{currentRangeLabel}
       </footer>
 
       {/* ---------- 调用日志抽屉 ---------- */}
