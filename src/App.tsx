@@ -67,7 +67,7 @@ export function App() {
       <main id="main-content">{error && <div className="error-banner" role="alert"><AlertCircle size={18} /><span>{error}</span><button onClick={() => { void refresh().catch(failure => setError(failure.message)); }}>重新连接</button></div>}
         {!data ? <div className="loading-state"><Busy_icon />正在整理工作台…</div> : <>
           {page === 'overview' && <Overview data={data} navigate={Page_open} createTask={() => setNewTask({})} openTask={Task_open} />}
-          {page === 'analytics' && <ModelUsageDashboard />}
+          {page === 'analytics' && <ModelUsageDashboard data={data} />}
           {page === 'models' && <Model_catalog models={data.models} providers={data.providers} notify={notify} refresh={refresh} createTask={model => setNewTask({ model })} openProviders={() => Page_open('providers')} />}
           {page === 'providers' && <Provider_page providers={data.providers} notify={notify} refresh={refresh} />}
           {page === 'tasks' && <Task_page tasks={data.tasks} selected={selected} select={setSelected} createTask={() => setNewTask({})} notify={notify} refresh={refresh} />}

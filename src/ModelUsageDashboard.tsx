@@ -15,13 +15,19 @@ import {
   Zap,
   type LucideIcon,
 } from 'lucide-react';
+import {
+  Format_date,
+  Format_number,
+  Format_tokens,
+  type Provider as ApiProvider,
+  type Model as ApiModel,
+  type Stats,
+} from './api.ts';
 import './ModelUsageDashboard.css';
 
 /* ============================== 类型定义 ============================== */
 
 export type TimeRange = '1h' | '24h' | '7d' | '30d';
-
-export type Provider = 'OpenAI' | 'Anthropic' | 'Google' | 'DeepSeek' | 'Qwen';
 
 export type CallStatus = 'success' | 'error';
 
@@ -39,9 +45,11 @@ export interface CallLog {
 export interface ModelStat {
   id: string;
   name: string;
-  provider: Provider;
+  provider: string;
+  tags: string[];
+  enabled: boolean;
   totalCalls: number;
-  successRate: number;      // 0 - 100
+  successRate: number; // 0 - 100
   avgLatencyMs: number;
   totalTokens: number;
   logs: CallLog[];
@@ -49,33 +57,20 @@ export interface ModelStat {
 
 export interface OverviewMetrics {
   totalCalls: number;
-  totalCallsTrend: number;  // 环比 %，正为上升
+  totalCallsTrend: number;
   successRate: number;
   successRateTrend: number;
   avgLatencyMs: number;
-  avgLatencyTrend: number;  // 延迟上升为负面
+  avgLatencyTrend: number;
   totalTokens: number;
   totalTokensTrend: number;
 }
 
-/** API 数据源契约：接入真实后端时实现这两个方法即可（见组件底部注释） */
-export interface ModelUsageDataSource {
-  getOverview(range: TimeRange): Promise<OverviewMetrics>;
-  getModelStats(range: TimeRange): Promise<ModelStat[]>;
+export interface DashboardDataProps {
+  providers: ApiProvider[];
+  models: ApiModel[];
+  stats: Stats;
 }
-
-interface MetricCardProps {
-  title: string;
-  value: string;
-  icon: LucideIcon;
-  iconClass: string;
-  trend: number;
-  /** 数值上升是否为正面（成功率上升=好，延迟上升=坏） */
-  invertTrend?: boolean;
-  suffix?: string;
-}
-
-/* ============================== 常量 & 工具 ============================== */
 
 const TIME_RANGE_OPTIONS: { value: TimeRange; label: string }[] = [
   { value: '1h', label: '1 小时' },
@@ -84,182 +79,78 @@ const TIME_RANGE_OPTIONS: { value: TimeRange; label: string }[] = [
   { value: '30d', label: '30 天' },
 ];
 
-const PROVIDERS: Array<Provider | 'all'> = ['all', 'OpenAI', 'Anthropic', 'Google', 'DeepSeek', 'Qwen'];
-
 /** 延迟分档：<500ms 绿 / 500-1500ms 黄 / >1500ms 红 */
 type LatencyLevel = 'good' | 'warn' | 'danger';
 
 function getLatencyLevel(ms: number): LatencyLevel {
+  if (ms <= 0) return 'good';
   if (ms < 500) return 'good';
   if (ms <= 1500) return 'warn';
   return 'danger';
 }
 
-function formatNumber(n: number): string {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
-  return String(n);
+/* ============================== 呈现子组件 ============================== */
+
+interface MetricCardProps {
+  title: string;
+  value: string;
+  icon: LucideIcon;
+  iconClass: string;
+  trend: number;
+  invertTrend?: boolean;
+  suffix?: string;
 }
 
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
-  return String(n);
-}
+function MetricCard({
+  title,
+  value,
+  icon: Icon,
+  iconClass,
+  trend,
+  invertTrend = false,
+  suffix,
+}: MetricCardProps) {
+  const isZero = trend === 0 || !Number.isFinite(trend);
+  const isPositive = trend > 0;
+  const isGood = invertTrend ? !isPositive : isPositive;
 
-/* ============================== Mock 数据层 ==============================
- * 真实接入时，用 fetch 替换 getMockDashboardData 内的逻辑，
- * 组件其余部分无需改动。
- * ====================================================================== */
-
-const RANGE_MULTIPLIER: Record<TimeRange, number> = {
-  '1h': 1,
-  '24h': 22,
-  '7d': 148,
-  '30d': 610,
-};
-
-const BASE_MODELS: Omit<ModelStat, 'totalCalls' | 'totalTokens' | 'logs'>[] = [
-  { id: 'gpt-4o', name: 'gpt-4o', provider: 'OpenAI', successRate: 99.2, avgLatencyMs: 842 },
-  { id: 'gpt-4o-mini', name: 'gpt-4o-mini', provider: 'OpenAI', successRate: 99.8, avgLatencyMs: 386 },
-  { id: 'claude-3-5', name: 'claude-3.5-sonnet', provider: 'Anthropic', successRate: 98.7, avgLatencyMs: 1124 },
-  { id: 'claude-haiku', name: 'claude-3-haiku', provider: 'Anthropic', successRate: 99.5, avgLatencyMs: 421 },
-  { id: 'gemini-pro', name: 'gemini-1.5-pro', provider: 'Google', successRate: 97.9, avgLatencyMs: 1638 },
-  { id: 'deepseek-v3', name: 'deepseek-v3', provider: 'DeepSeek', successRate: 99.4, avgLatencyMs: 654 },
-  { id: 'qwen-max', name: 'qwen-max', provider: 'Qwen', successRate: 96.8, avgLatencyMs: 1892 },
-  { id: 'qwen-turbo', name: 'qwen-turbo', provider: 'Qwen', successRate: 99.1, avgLatencyMs: 312 },
-];
-
-const ENDPOINTS = ['/v1/chat/completions', '/v1/embeddings', '/v1/messages', '/v1/responses'];
-
-const ERROR_MESSAGES = [
-  'rate_limit_exceeded: 请求速率超限',
-  'context_length_exceeded: 上下文长度超限',
-  'timeout: 上游请求超时',
-  'invalid_api_key: 鉴权失败',
-];
-
-function seededRandom(seed: number): () => number {
-  let s = seed;
-  return () => {
-    s = (s * 9301 + 49297) % 233280;
-    return s / 233280;
-  };
-}
-
-function generateLogs(model: BaseLogSeed, range: TimeRange): CallLog[] {
-  const rand = seededRandom(model.id.charCodeAt(0) * 7 + range.length * 13);
-  const count = range === '1h' ? 18 : range === '24h' ? 32 : 24;
-  const logs: CallLog[] = [];
-  const now = Date.now();
-  const step = range === '1h' ? 3 * 60_000 : range === '24h' ? 42 * 60_000 : 3.6 * 3_600_000;
-
-  for (let i = 0; i < count; i++) {
-    const isError = rand() * 100 > model.successRate;
-    const latency = Math.max(
-      80,
-      Math.round(model.avgLatencyMs * (0.4 + rand() * 1.6) + (isError ? rand() * 3000 : 0)),
-    );
-    const inputTokens = Math.round(120 + rand() * 2600);
-    const outputTokens = isError ? 0 : Math.round(80 + rand() * 1800);
-
-    logs.push({
-      id: `${model.id}-log-${i}`,
-      timestamp: new Date(now - i * step - rand() * step).toLocaleString('zh-CN', { hour12: false }),
-      status: isError ? 'error' : 'success',
-      endpoint: ENDPOINTS[Math.floor(rand() * ENDPOINTS.length)],
-      latencyMs: latency,
-      inputTokens,
-      outputTokens,
-      errorMessage: isError ? ERROR_MESSAGES[Math.floor(rand() * ERROR_MESSAGES.length)] : undefined,
-    });
-  }
-  return logs;
-}
-
-type BaseLogSeed = Pick<ModelStat, 'id' | 'successRate' | 'avgLatencyMs'>;
-
-interface DashboardData {
-  metrics: OverviewMetrics;
-  models: ModelStat[];
-}
-
-function getMockDashboardData(range: TimeRange): DashboardData {
-  const mult = RANGE_MULTIPLIER[range];
-  const models: ModelStat[] = BASE_MODELS.map((m, i) => {
-    const baseCalls = [4200, 8800, 2600, 3100, 1900, 3400, 1200, 5400][i];
-    const totalCalls = Math.round(baseCalls * mult * (0.9 + ((i * 7 + range.length) % 5) * 0.05));
-    return {
-      ...m,
-      // 不同时间范围略有抖动
-      avgLatencyMs: Math.round(m.avgLatencyMs * (0.92 + ((i + range.length) % 4) * 0.06)),
-      successRate: Math.min(100, m.successRate + (((i * 3 + range.length) % 7) - 3) * 0.1),
-      totalCalls,
-      totalTokens: Math.round(totalCalls * (1400 + i * 120)),
-      logs: generateLogs(m, range),
-    };
-  });
-
-  const totalCalls = models.reduce((s, m) => s + m.totalCalls, 0);
-  const totalTokens = models.reduce((s, m) => s + m.totalTokens, 0);
-  const weightedLatency = Math.round(
-    models.reduce((s, m) => s + m.avgLatencyMs * m.totalCalls, 0) / totalCalls,
-  );
-  const weightedSuccess =
-    Math.round((models.reduce((s, m) => s + m.successRate * m.totalCalls, 0) / totalCalls) * 10) / 10;
-
-  return {
-    metrics: {
-      totalCalls,
-      totalCallsTrend: 12.4,
-      successRate: weightedSuccess,
-      successRateTrend: 0.6,
-      avgLatencyMs: weightedLatency,
-      avgLatencyTrend: -5.2,
-      totalTokens,
-      totalTokensTrend: 8.9,
-    },
-    models,
-  };
-}
-
-/* ============================== 子组件 ============================== */
-
-function MetricCard({ title, value, icon: Icon, iconClass, trend, invertTrend = false, suffix }: MetricCardProps) {
-  const isPositive = invertTrend ? trend < 0 : trend > 0;
-  const TrendIcon = trend >= 0 ? ArrowUpRight : ArrowDownRight;
+  const trendClass = isZero ? 'neutral' : isGood ? 'positive' : 'negative';
+  const TrendIcon = isPositive ? ArrowUpRight : ArrowDownRight;
 
   return (
     <div className="mud-metric-card">
-      <div className="mud-metric-header">
+      <div className="mud-metric-head">
+        <span className="mud-metric-title">{title}</span>
         <div className={`mud-metric-icon ${iconClass}`}>
-          <Icon size={18} strokeWidth={2} />
+          <Icon size={18} />
         </div>
-        <span className={`mud-trend-badge ${isPositive ? 'positive' : 'negative'}`}>
-          <TrendIcon size={13} />
-          {Math.abs(trend)}%
-        </span>
       </div>
-      <div className="mud-metric-value">
-        {value}
-        {suffix && <span className="mud-metric-suffix">{suffix}</span>}
+      <div className="mud-metric-body">
+        <div className="mud-metric-value">
+          {value}
+          {suffix && <span className="mud-metric-suffix">{suffix}</span>}
+        </div>
+        <div className={`mud-trend-tag ${trendClass}`}>
+          {!isZero && <TrendIcon size={12} />}
+          <span>{isZero ? '平稳' : `${Math.abs(trend).toFixed(1)}%`}</span>
+        </div>
       </div>
-      <div className="mud-metric-title">{title} · 较上周期</div>
     </div>
   );
 }
 
 function LatencyTag({ ms }: { ms: number }) {
+  if (ms <= 0) return <span className="mud-latency good">-</span>;
   const level = getLatencyLevel(ms);
   return (
-    <span className={`mud-latency-tag ${level}`}>
+    <span className={`mud-latency ${level}`}>
       <span className="mud-latency-dot" />
-      {formatNumber(ms)} ms
+      {Format_number(ms)} ms
     </span>
   );
 }
 
-/* ------------------------- 调用日志抽屉 ------------------------- */
+/* ============================== 日志抽屉 ============================== */
 
 interface LogDrawerProps {
   model: ModelStat;
@@ -271,7 +162,7 @@ function LogDrawer({ model, onClose }: LogDrawerProps) {
 
   return (
     <>
-      <div className="mud-drawer-overlay" onClick={onClose} />
+      <div className="mud-drawer-backdrop" onClick={onClose} />
       <aside className="mud-drawer" role="dialog" aria-label={`${model.name} 调用日志`}>
         <header className="mud-drawer-header">
           <div>
@@ -293,48 +184,55 @@ function LogDrawer({ model, onClose }: LogDrawerProps) {
             <Clock size={14} /> 平均延迟 <LatencyTag ms={model.avgLatencyMs} />
           </div>
           <div className="mud-drawer-summary-item">
-            <CheckCircle2 size={14} /> 成功率 <strong>{model.successRate.toFixed(1)}%</strong>
+            <CheckCircle2 size={14} /> 成功率 <strong>{model.totalCalls > 0 ? `${model.successRate.toFixed(1)}%` : '暂无'}</strong>
           </div>
         </div>
 
         <div className="mud-drawer-body">
-          <table className="mud-log-table">
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>状态</th>
-                <th>端点</th>
-                <th>延迟</th>
-                <th>Tokens</th>
-              </tr>
-            </thead>
-            <tbody>
-              {model.logs.map((log) => (
-                <tr key={log.id} className={log.status === 'error' ? 'is-error' : ''}>
-                  <td className="mud-log-time">{log.timestamp}</td>
-                  <td>
-                    {log.status === 'success' ? (
-                      <span className="mud-status success" title="成功">
-                        <CheckCircle2 size={13} /> 成功
-                      </span>
-                    ) : (
-                      <span className="mud-status error" title={log.errorMessage}>
-                        <AlertTriangle size={13} /> 失败
-                      </span>
-                    )}
-                    {log.errorMessage && <div className="mud-log-error-msg">{log.errorMessage}</div>}
-                  </td>
-                  <td className="mud-log-endpoint">{log.endpoint}</td>
-                  <td>
-                    <LatencyTag ms={log.latencyMs} />
-                  </td>
-                  <td className="mud-log-tokens">
-                    {formatNumber(log.inputTokens)} / {formatNumber(log.outputTokens)}
-                  </td>
+          {model.logs.length === 0 ? (
+            <div className="mud-empty" style={{ padding: '40px 0' }}>
+              <Clock size={24} />
+              <p>该模型暂无调用记录</p>
+            </div>
+          ) : (
+            <table className="mud-log-table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>状态</th>
+                  <th>来源</th>
+                  <th>延迟</th>
+                  <th>Tokens</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {model.logs.map((log) => (
+                  <tr key={log.id} className={log.status === 'error' ? 'is-error' : ''}>
+                    <td className="mud-log-time">{log.timestamp}</td>
+                    <td>
+                      {log.status === 'success' ? (
+                        <span className="mud-status success" title="成功">
+                          <CheckCircle2 size={13} /> 成功
+                        </span>
+                      ) : (
+                        <span className="mud-status error" title={log.errorMessage}>
+                          <AlertTriangle size={13} /> 失败
+                        </span>
+                      )}
+                      {log.errorMessage && <div className="mud-log-error-msg">{log.errorMessage}</div>}
+                    </td>
+                    <td className="mud-log-endpoint">{log.endpoint}</td>
+                    <td>
+                      <LatencyTag ms={log.latencyMs} />
+                    </td>
+                    <td className="mud-log-tokens">
+                      {log.inputTokens || log.outputTokens ? `${Format_number(log.inputTokens)} / ${Format_number(log.outputTokens)}` : '未上报'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       </aside>
     </>
@@ -343,30 +241,162 @@ function LogDrawer({ model, onClose }: LogDrawerProps) {
 
 /* ============================== 主组件 ============================== */
 
-export function ModelUsageDashboard() {
+export function ModelUsageDashboard({ data }: { data?: DashboardDataProps }) {
   const [timeRange, setTimeRange] = useState<TimeRange>('24h');
   const [search, setSearch] = useState('');
-  const [provider, setProvider] = useState<Provider | 'all'>('all');
+  const [selectedProvider, setSelectedProvider] = useState<string>('all');
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
 
-  const data = useMemo(() => getMockDashboardData(timeRange), [timeRange]);
+  // 1. 动态供应商列表（从实际添加的供应商中获取）
+  const providerOptions = useMemo(() => {
+    if (!data?.providers) return ['all'];
+    const names = data.providers.map((p) => p.name).filter(Boolean);
+    return ['all', ...Array.from(new Set(names))];
+  }, [data?.providers]);
 
+  // 2. 根据时间范围与实际数据库数据计算各项指标
+  const { metrics, modelStats } = useMemo(() => {
+    if (!data) {
+      return {
+        metrics: {
+          totalCalls: 0,
+          totalCallsTrend: 0,
+          successRate: 100,
+          successRateTrend: 0,
+          avgLatencyMs: 0,
+          avgLatencyTrend: 0,
+          totalTokens: 0,
+          totalTokensTrend: 0,
+        },
+        modelStats: [] as ModelStat[],
+      };
+    }
+
+    const now = Date.now();
+    const rangeMs: Record<TimeRange, number> = {
+      '1h': 3600 * 1000,
+      '24h': 24 * 3600 * 1000,
+      '7d': 7 * 24 * 3600 * 1000,
+      '30d': 30 * 24 * 3600 * 1000,
+    };
+    const cutoff = now - rangeMs[timeRange];
+
+    // 筛选当前时间范围内的调用记录
+    const recentCalls = (data.stats.recent || []).filter((c) => {
+      const time = new Date(c.created_at).getTime();
+      return isNaN(time) || time >= cutoff;
+    });
+
+    // 统计总览指标
+    const totalCalls = recentCalls.length;
+    const succeededCalls = recentCalls.filter((c) => c.status === 'succeeded').length;
+    const successRate = totalCalls > 0 ? (succeededCalls / totalCalls) * 100 : 100;
+    const avgLatencyMs =
+      totalCalls > 0
+        ? Math.round(recentCalls.reduce((s, c) => s + c.duration_ms, 0) / totalCalls)
+        : Math.round(data.stats.totals.average_ms || 0);
+    const totalTokens = recentCalls.reduce(
+      (s, c) => s + (c.input_tokens ?? 0) + (c.output_tokens ?? 0),
+      0,
+    );
+
+    // 环比分析（对比前一相同周期）
+    const prevCutoff = cutoff - rangeMs[timeRange];
+    const prevCalls = (data.stats.recent || []).filter((c) => {
+      const time = new Date(c.created_at).getTime();
+      return time >= prevCutoff && time < cutoff;
+    });
+    const totalCallsTrend =
+      prevCalls.length > 0
+        ? ((totalCalls - prevCalls.length) / prevCalls.length) * 100
+        : 0;
+
+    const metricsResult: OverviewMetrics = {
+      totalCalls: totalCalls > 0 ? totalCalls : data.stats.totals.calls,
+      totalCallsTrend,
+      successRate: totalCalls > 0 ? successRate : (data.stats.totals.calls > 0 ? (data.stats.totals.succeeded / data.stats.totals.calls) * 100 : 100),
+      successRateTrend: 0,
+      avgLatencyMs,
+      avgLatencyTrend: 0,
+      totalTokens: totalTokens > 0 ? totalTokens : (data.stats.totals.input_tokens + data.stats.totals.output_tokens),
+      totalTokensTrend: 0,
+    };
+
+    // 匹配数据库中的模型统计
+    const statsMap = new Map<string, { calls: number; tokens: number; avgLatency: number }>();
+    for (const m of data.stats.models || []) {
+      statsMap.set(m.model_name, { calls: m.calls, tokens: m.tokens, avgLatency: m.average_ms });
+    }
+
+    const list: ModelStat[] = (data.models || []).map((m) => {
+      const modelCalls = recentCalls.filter((c) => c.model_name === m.remote_id);
+      const allModelCalls = (data.stats.recent || []).filter((c) => c.model_name === m.remote_id);
+      const statEntry = statsMap.get(m.remote_id);
+
+      const callsCount = modelCalls.length > 0 ? modelCalls.length : (statEntry?.calls ?? 0);
+      const modelSucceeded = modelCalls.filter((c) => c.status === 'succeeded').length;
+      const modelSuccessRate =
+        modelCalls.length > 0
+          ? (modelSucceeded / modelCalls.length) * 100
+          : 100;
+      const modelAvgLatency =
+        modelCalls.length > 0
+          ? Math.round(modelCalls.reduce((s, c) => s + c.duration_ms, 0) / modelCalls.length)
+          : Math.round(statEntry?.avgLatency ?? 0);
+      const modelTokens =
+        modelCalls.length > 0
+          ? modelCalls.reduce((s, c) => s + (c.input_tokens ?? 0) + (c.output_tokens ?? 0), 0)
+          : (statEntry?.tokens ?? 0);
+
+      const logs: CallLog[] = allModelCalls.map((c) => ({
+        id: c.id,
+        timestamp: Format_date(c.created_at),
+        status: c.status === 'succeeded' ? 'success' : 'error',
+        endpoint: c.source === 'mcp' ? 'MCP / Agent' : c.source === 'task' ? 'Web 任务' : 'Chat API',
+        latencyMs: c.duration_ms,
+        inputTokens: c.input_tokens ?? 0,
+        outputTokens: c.output_tokens ?? 0,
+        errorMessage: c.error ?? undefined,
+      }));
+
+      return {
+        id: m.id,
+        name: m.remote_id,
+        provider: m.provider_name,
+        tags: m.tags || [],
+        enabled: Boolean(m.enabled),
+        totalCalls: callsCount,
+        successRate: modelSuccessRate,
+        avgLatencyMs: modelAvgLatency,
+        totalTokens: modelTokens,
+        logs,
+      };
+    });
+
+    // 默认按照调用量从高到低排序，调用量相同时按启用状态及名称排序
+    list.sort((a, b) => b.totalCalls - a.totalCalls || (b.enabled ? 1 : 0) - (a.enabled ? 1 : 0) || a.name.localeCompare(b.name));
+
+    return { metrics: metricsResult, modelStats: list };
+  }, [data, timeRange]);
+
+  // 3. 过滤搜索
   const filteredModels = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return data.models.filter((m) => {
+    return modelStats.filter((m) => {
       const matchesSearch =
-        !q || m.name.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q);
-      const matchesProvider = provider === 'all' || m.provider === provider;
+        !q ||
+        m.name.toLowerCase().includes(q) ||
+        m.provider.toLowerCase().includes(q) ||
+        m.tags.some((t) => t.toLowerCase().includes(q));
+      const matchesProvider = selectedProvider === 'all' || m.provider === selectedProvider;
       return matchesSearch && matchesProvider;
     });
-  }, [data.models, search, provider]);
+  }, [modelStats, search, selectedProvider]);
 
   const selectedModel = useMemo(
-    () => data.models.find((m) => m.id === selectedModelId) ?? null,
-    [data.models, selectedModelId],
+    () => modelStats.find((m) => m.id === selectedModelId) ?? null,
+    [modelStats, selectedModelId],
   );
-
-  const { metrics } = data;
 
   return (
     <div className="mud-root">
@@ -374,7 +404,7 @@ export function ModelUsageDashboard() {
       <header className="mud-header">
         <div>
           <h1 className="mud-title">模型用量监控</h1>
-          <p className="mud-subtitle">实时追踪各 AI 模型的调用量、成功率和响应延迟</p>
+          <p className="mud-subtitle">实时追踪个人工作台各实际模型的调用量、成功率和响应延迟</p>
         </div>
         <div className="mud-range-switch" role="tablist" aria-label="时间范围">
           {TIME_RANGE_OPTIONS.map((opt) => (
@@ -395,7 +425,7 @@ export function ModelUsageDashboard() {
       <section className="mud-metrics-grid">
         <MetricCard
           title="总调用次数"
-          value={formatNumber(metrics.totalCalls)}
+          value={Format_number(metrics.totalCalls)}
           icon={Activity}
           iconClass="blue"
           trend={metrics.totalCallsTrend}
@@ -410,8 +440,8 @@ export function ModelUsageDashboard() {
         />
         <MetricCard
           title="平均响应延迟"
-          value={formatNumber(metrics.avgLatencyMs)}
-          suffix="ms"
+          value={metrics.avgLatencyMs > 0 ? Format_number(metrics.avgLatencyMs) : '—'}
+          suffix={metrics.avgLatencyMs > 0 ? 'ms' : ''}
           icon={Zap}
           iconClass="amber"
           trend={metrics.avgLatencyTrend}
@@ -419,7 +449,7 @@ export function ModelUsageDashboard() {
         />
         <MetricCard
           title="消耗总 Token 数"
-          value={formatTokens(metrics.totalTokens)}
+          value={Format_tokens(metrics.totalTokens, 0)}
           icon={Coins}
           iconClass="violet"
           trend={metrics.totalTokensTrend}
@@ -432,7 +462,7 @@ export function ModelUsageDashboard() {
           <Search size={15} />
           <input
             type="text"
-            placeholder="搜索模型名称或供应商…"
+            placeholder="搜索实际模型名称、供应商或标签…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -443,11 +473,11 @@ export function ModelUsageDashboard() {
           )}
         </div>
         <div className="mud-provider-filters">
-          {PROVIDERS.map((p) => (
+          {providerOptions.map((p) => (
             <button
               key={p}
-              className={`mud-chip ${provider === p ? 'active' : ''}`}
-              onClick={() => setProvider(p)}
+              className={`mud-chip ${selectedProvider === p ? 'active' : ''}`}
+              onClick={() => setSelectedProvider(p)}
             >
               {p === 'all' ? '全部供应商' : p}
             </button>
@@ -484,23 +514,30 @@ export function ModelUsageDashboard() {
               <div className="mud-model-avatar">{m.provider.charAt(0)}</div>
               <div>
                 <div className="mud-model-name">{m.name}</div>
-                <div className="mud-model-provider">{m.provider}</div>
+                <div className="mud-model-provider">
+                  {m.provider}
+                  {m.tags.length > 0 && (
+                    <span style={{ marginLeft: '8px', opacity: 0.8 }}>
+                      · {m.tags.join(', ')}
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
 
             <div className="mud-cell">
-              <div className="mud-cell-main">{formatNumber(m.totalCalls)}</div>
+              <div className="mud-cell-main">{Format_number(m.totalCalls)}</div>
               <div className="mud-cell-sub">次调用</div>
             </div>
 
             <div className="mud-cell mud-cell-rate">
               <div className="mud-rate-track">
                 <div
-                  className={`mud-rate-fill ${m.successRate >= 99 ? 'good' : m.successRate >= 97 ? 'warn' : 'danger'}`}
-                  style={{ width: `${m.successRate}%` }}
+                  className={`mud-rate-fill ${m.totalCalls === 0 ? 'good' : m.successRate >= 99 ? 'good' : m.successRate >= 90 ? 'warn' : 'danger'}`}
+                  style={{ width: `${m.totalCalls === 0 ? 100 : m.successRate}%` }}
                 />
               </div>
-              <span className="mud-cell-sub">{m.successRate.toFixed(1)}%</span>
+              <span className="mud-cell-sub">{m.totalCalls === 0 ? '暂无' : `${m.successRate.toFixed(1)}%`}</span>
             </div>
 
             <div className="mud-cell">
@@ -510,7 +547,7 @@ export function ModelUsageDashboard() {
             <div className="mud-cell">
               <div className="mud-cell-main">
                 <Coins size={14} className="mud-token-icon" />
-                {formatTokens(m.totalTokens)}
+                {Format_tokens(m.totalTokens, 0)}
               </div>
             </div>
 
@@ -523,7 +560,7 @@ export function ModelUsageDashboard() {
 
       <footer className="mud-footer">
         <TrendingUp size={13} />
-        共 {filteredModels.length} 个模型 · 统计周期：{TIME_RANGE_OPTIONS.find((o) => o.value === timeRange)?.label}
+        共 {filteredModels.length} 个实际模型 · 统计周期：{TIME_RANGE_OPTIONS.find((o) => o.value === timeRange)?.label}
       </footer>
 
       {/* ---------- 调用日志抽屉 ---------- */}
@@ -533,11 +570,3 @@ export function ModelUsageDashboard() {
 }
 
 export default ModelUsageDashboard;
-
-/* ============================ 接入真实后端示例 ============================
- * const apiSource: ModelUsageDataSource = {
- *   getOverview: (r) => fetch(`/api/metrics/overview?range=${r}`).then(res => res.json()),
- *   getModelStats: (r) => fetch(`/api/metrics/models?range=${r}`).then(res => res.json()),
- * };
- * 然后在组件内用 useEffect + useState（或 React Query / SWR）替换 getMockDashboardData。
- * ====================================================================== */
